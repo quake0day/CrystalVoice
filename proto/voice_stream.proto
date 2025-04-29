@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package voicecomm;
+
+// The VoiceStream service definition.
+service VoiceStream {
+  // Client-to-server streaming RPC for sending audio chunks
+  rpc Transmit(stream AudioChunk) returns (Ack) {}
+}
+
+// AudioChunk contains the encoded audio frame data sent by the sender
+message AudioChunk {
+  // The encoded audio tokens (compressed representation)
+  bytes encoded_frame = 1;
+  
+  // Optional timestamp for latency measurements (milliseconds since epoch)
+  int64 timestamp_ms = 2;
+  
+  // Optional sequence number for debugging
+  int32 sequence_number = 3;
+}
+
+// Simple acknowledgment message for the end of stream
+message Ack {
+  // Indicates if the stream was received properly
+  bool received = 1;
+  
+  // Optional message for errors or status
+  string message = 2;
+} 
