@@ -16,6 +16,7 @@ The system consists of three main components:
 Key features:
 - **Ultra Low Bandwidth**: Compresses voice audio to ~3-6 kbps without quality loss
 - **High Fidelity**: Preserves the speaker's timbre and nuances with zero perceptible distortion
+- **Semantic Compression**: Extracts HuBERT acoustic tokens and ECAPA-TDNN speaker embeddings every 100 ms for robust reconstruction
 - **Low Latency**: End-to-end latency under 300ms for natural conversation flow
 - **Privacy-Preserving**: All processing is done locally with pre-trained models
 - **Standard Protocol**: Uses gRPC for efficient and reliable streaming
@@ -145,6 +146,8 @@ curl -X POST http://localhost:8765/update -H "Content-Type: application/json" -d
 
 The system uses EnCodec, a state-of-the-art neural audio codec by Meta AI, to compress audio while maintaining high fidelity. The encoder on the sender side transforms raw audio into semantic tokens, which are transmitted over gRPC. The receiver then uses a generative decoder to reconstruct the original audio from these tokens.
 
+Audio is processed in 100 ms chunks (1 600 samples at 16 kHz). Each chunk is passed through HuBERT and an ECAPA-TDNN speaker encoder to obtain discrete acoustic tokens and a speaker embedding, ensuring the downstream models receive inputs of sufficient length.
+
 Both sender and receiver components automatically send performance metrics to the WebUI monitor, which visualizes them in real-time using a Gradio-based dashboard.
 
 ## License
@@ -173,6 +176,7 @@ Both sender and receiver components automatically send performance metrics to th
 主要特点：
 - **超低带宽**：将语音音频压缩到约3-6 kbps，无质量损失
 - **高保真度**：保留说话者的音色和细微差别，无可感知的失真
+- **语义压缩**：每100 ms提取HuBERT声学令牌和ECAPA-TDNN说话人嵌入，用于高质量重建
 - **低延迟**：端到端延迟低于300毫秒，确保自然的对话流程
 - **保护隐私**：所有处理都在本地使用预训练模型完成
 - **标准协议**：使用gRPC进行高效可靠的流式传输
@@ -301,6 +305,8 @@ curl -X POST http://localhost:8765/update -H "Content-Type: application/json" -d
 ## 架构
 
 系统使用Meta AI的EnCodec（一种最先进的神经音频编解码器）来压缩音频，同时保持高保真度。发送端的编码器将原始音频转换为语义令牌，通过gRPC传输。接收端然后使用生成式解码器从这些令牌重建原始音频。
+
+系统以100 毫秒的窗口（16 kHz下为1 600个采样）处理音频。每个窗口经过HuBERT和ECAPA-TDNN说话人编码器，得到离散的声学令牌和说话人嵌入，确保下游模型获得充足的输入长度。
 
 发送端和接收端组件会自动将性能指标发送到WebUI监控，后者使用基于Gradio的仪表盘实时可视化这些数据。
 

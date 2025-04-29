@@ -17,6 +17,8 @@ import torch
 import requests
 from dotenv import load_dotenv
 import sounddevice as sd
+import signal
+import pickle # For deserializing test output if needed later
 
 # Add parent directory to path so we can import modules
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -25,9 +27,11 @@ sys.path.insert(0, parent_dir)
 from proto import voice_stream_pb2
 from proto import voice_stream_pb2_grpc
 from sender.audio_capture import AudioCapture
-from sender.encoder import Encoder
-from utils.audio_utils import get_timestamp_ms, list_audio_devices, measure_latency
+from utils.audio_utils import list_audio_devices
+from sender.feature_extractor import AudioFeatureExtractor, TARGET_SAMPLE_RATE, CHUNK_SAMPLES
+from utils.audio_utils import get_timestamp_ms, measure_latency
 from model.model_config import SAMPLE_RATE, CHUNK_SIZE, TARGET_BITRATE
+from utils.monitor_client import MonitorClient
 
 # Load environment variables from .env file if present
 load_dotenv()
@@ -42,293 +46,202 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Sender")
 
-class Sender:
+# Global flag to signal shutdown
+shutdown_flag = threading.Event()
+
+class AudioProcessor:
     """
-    Main sender class that orchestrates audio capture, encoding and transmission.
+    Processes audio chunks: extracts features and sends them via gRPC.
+    Also sends metrics to the monitor.
     """
-    
-    def __init__(self, target_address, mic_device=None, sample_rate=SAMPLE_RATE,
-                 bitrate=TARGET_BITRATE, verbose=False):
-        """
-        Initialize the sender.
-        
-        Args:
-            target_address (str): The address of the receiver in format "host:port"
-            mic_device (int): Microphone device index (None for default)
-            sample_rate (int): Audio sample rate in Hz
-            bitrate (float): Target bitrate in kbps
-            verbose (bool): Enable verbose logging
-        """
-        if verbose:
-            logging.getLogger().setLevel(logging.DEBUG)
-            
-        self.target_address = target_address
-        self.mic_device = mic_device
-        self.sample_rate = sample_rate
-        self.bitrate = bitrate
-        self.running = False
-        self.sequence_number = 0
-        
-        # Detect device
-        if torch.cuda.is_available():
-            self.device = "cuda"
-            logger.info("Using CUDA device for encoding")
-        elif torch.backends.mps.is_available():
-            self.device = "mps"
-            logger.info("Using Apple Silicon GPU for encoding")
-        else:
-            self.device = "cpu"
-            logger.info("Using CPU for encoding")
-            
-        # Initialize components
-        self.audio_capture = None
-        self.encoder = None
-        self.grpc_channel = None
+    def __init__(self, target, device="cpu", monitor_url=None):
+        self.target = target
+        self.feature_extractor = AudioFeatureExtractor(device=device)
+        self.channel = None
         self.stub = None
-        
-    def setup(self):
-        """Set up audio capture, encoder, and gRPC connection."""
+        self.connected = False
+        self.sequence_id = 0
+        self.monitor_client = MonitorClient(monitor_url) if monitor_url else None
+        self.last_monitor_update = time.time()
+
+    def connect(self):
+        """Establish gRPC connection."""
         try:
-            # Initialize audio capture
-            logger.info("Initializing audio capture...")
-            self.audio_capture = AudioCapture(
-                device_index=self.mic_device,
-                sample_rate=self.sample_rate,
-                chunk_size=CHUNK_SIZE
-            )
-            
-            # Initialize encoder
-            logger.info("Initializing audio encoder...")
-            self.encoder = Encoder(device=self.device)
-            self.encoder.set_bitrate(self.bitrate)
-            
-            # Initialize gRPC
-            logger.info(f"Setting up gRPC connection to {self.target_address}...")
-            self.grpc_channel = grpc.insecure_channel(self.target_address)
-            self.stub = voice_stream_pb2_grpc.VoiceStreamStub(self.grpc_channel)
-            
-            logger.info("Sender setup complete")
+            # Use insecure channel for local testing
+            self.channel = grpc.insecure_channel(self.target)
+            self.stub = voice_stream_pb2_grpc.VoiceStreamerStub(self.channel)
+            # Add a simple connectivity check if possible, e.g., a dummy unary call
+            # Or rely on the stream failing if connection is bad
+            self.connected = True
+            logger.info(f"Successfully connected to gRPC server at {self.target}")
             return True
-            
-        except Exception as e:
-            logger.error(f"Error during setup: {e}")
-            self.cleanup()
-            return False
-            
-    def start(self):
-        """Start the sender."""
-        try:
-            # Start audio capture
-            if not self.audio_capture.start():
-                logger.error("Failed to start audio capture")
-                return False
-                
-            # Start sending thread
-            self.running = True
-            self.send_thread = threading.Thread(target=self._stream_audio)
-            self.send_thread.start()
-            
-            logger.info("Sender started successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error starting sender: {e}")
-            self.stop()
-            return False
-            
-    def _stream_audio(self):
-        """Main streaming loop (runs in a separate thread)."""
-        logger.info("Audio streaming thread started")
-        
-        try:
-            # Create a streaming RPC
-            stream = self.stub.Transmit(self._generate_requests())
-            
-            # Wait for the RPC to complete (or error)
-            response = stream
-            logger.info(f"Stream completed with response: {response}")
-            
         except grpc.RpcError as e:
-            logger.error(f"RPC error: {e.code()}: {e.details()}")
+            logger.error(f"Failed to connect to gRPC server at {self.target}: {e}")
+            self.connected = False
+            return False
+
+    def _send_data_iterator(self, audio_capture):
+        """Generator function to yield VoiceChunk messages."""
+        while not shutdown_flag.is_set():
+            audio_frame = audio_capture.read(timeout=0.1) # Read with timeout
+            if audio_frame is None:
+                # No data available currently, yield control briefly
+                # time.sleep(0.005) # Small sleep to prevent busy-waiting if needed
+                continue
+
+            start_time = time.time()
+
+            # 1. Extract features
+            tokens_bytes, embedding_bytes = self.feature_extractor.extract_features(audio_frame)
+
+            if not tokens_bytes or not embedding_bytes:
+                 logger.warning("Feature extraction failed, skipping frame.")
+                 continue # Skip this frame if extraction failed
+
+            # 2. Create protobuf message
+            timestamp_ms = int(time.time() * 1000)
+            chunk_msg = voice_stream_pb2.VoiceChunk(
+                sequence_id=self.sequence_id,
+                timestamp_ms=timestamp_ms,
+                hubert_tokens=tokens_bytes,
+                speaker_embedding=embedding_bytes
+            )
+            self.sequence_id += 1
+
+            # 3. Yield the message for sending
+            yield chunk_msg
+
+            # --- Monitoring --- (Optional, can be simplified/removed for initial test)
+            end_time = time.time()
+            processing_latency = (end_time - start_time) * 1000 # ms
+            current_time = time.time()
+            if self.monitor_client and (current_time - self.last_monitor_update >= 5):
+                # Simulate some metrics for now
+                metrics = {
+                    "bitrate": 0, # Not applicable now
+                    "latency": int(processing_latency), # Use processing time as a proxy
+                    "packet_loss": 0, # Not tracked here
+                    "buffer_size": audio_capture.get_queue_size()
+                }
+                self.monitor_client.send_metrics(metrics)
+                self.last_monitor_update = current_time
+            # --- End Monitoring ---
+
+        logger.info("Sender loop finished.")
+
+
+    def start_streaming(self, audio_capture):
+        """Starts the bidirectional streaming process."""
+        if not self.connected:
+            logger.error("Cannot start streaming, not connected to server.")
+            return
+
+        logger.info("Starting audio streaming...")
+        try:
+            # Create the iterator for sending data
+            send_iterator = self._send_data_iterator(audio_capture)
+
+            # Start the bidirectional stream
+            # The response stream is currently unused but required by the proto definition
+            response_iterator = self.stub.StreamVoice(send_iterator)
+
+            # Consume responses (or just ignore them for now)
+            # In a real scenario, this could handle ACKs or control messages
+            for ack in response_iterator:
+                # logger.debug(f"Received ACK for seq: {ack.sequence_id}, status: {ack.status}")
+                pass # Just consume for now
+
+        except grpc.RpcError as e:
+            logger.error(f"gRPC Error during streaming: {e.status()} - {e.details()}")
+            self.connected = False # Mark as disconnected on error
         except Exception as e:
-            logger.error(f"Streaming error: {e}")
+            logger.error(f"An unexpected error occurred during streaming: {e}", exc_info=True)
         finally:
-            self.running = False
-            logger.info("Audio streaming thread ended")
-            
-    def _generate_requests(self):
-        """Generator that yields audio chunks for the gRPC stream."""
-        sent_count = 0
-        error_count = 0
-        
-        last_stats_time = time.time()
-        total_bytes_sent = 0
-        last_bytes_sent = 0
-        last_sent_count = 0
-        
-        while self.running:
-            try:
-                # Capture timestamp for latency measurement
-                capture_time = get_timestamp_ms()
-                
-                # Read audio chunk from queue
-                audio_chunk = self.audio_capture.read()
-                
-                if audio_chunk is None:
-                    time.sleep(0.01)  # Avoid busy-waiting
-                    continue
-                    
-                # Encode the audio chunk
-                encoded_data = self.encoder.encode(audio_chunk)
-                
-                # Check if encoding was successful
-                if encoded_data == b'':
-                    error_count += 1
-                    if error_count > 10:
-                        logger.error("Too many encoding errors, stopping")
-                        break
-                    continue
-                
-                # Measure and log encoding latency
-                encode_latency = measure_latency(capture_time, "capture")
-                
-                # Create protobuf message
-                chunk = voice_stream_pb2.AudioChunk(
-                    encoded_frame=encoded_data,
-                    timestamp_ms=capture_time,
-                    sequence_number=self.sequence_number
-                )
-                
-                # Increment sequence number
-                self.sequence_number += 1
-                sent_count += 1
-                total_bytes_sent += len(encoded_data)
-                
-                # Log statistics periodically
-                if sent_count % 100 == 0:
-                    # Calculate approximate bitrate
-                    avg_bytes = sum(len(c.encoded_frame) for c in [chunk]) / 1
-                    estimated_kbps = (avg_bytes * 8 * (1000 / (CHUNK_SIZE / self.sample_rate * 1000))) / 1000
-                    logger.info(f"Sent {sent_count} chunks, recent avg: {estimated_kbps:.2f} kbps, "
-                               f"encode latency: {encode_latency}ms")
-                    
-                    # Send stats to monitor every 5 seconds
-                    now = time.time()
-                    if now - last_stats_time >= 5.0:
-                        elapsed = now - last_stats_time
-                        bytes_diff = total_bytes_sent - last_bytes_sent
-                        chunks_diff = sent_count - last_sent_count
-                        
-                        # Calculate actual bitrate over the last 5 seconds
-                        actual_kbps = (bytes_diff * 8 / 1000) / elapsed if elapsed > 0 else 0
-                        
-                        try:
-                            monitor_url = os.environ.get("MONITOR_URL", "http://localhost:8765/update")
-                            stats_payload = {
-                                "bitrate": round(actual_kbps, 2),
-                                "latency": round(encode_latency),
-                                "packet_loss": 0.0,  # Sender doesn't have packet loss info
-                                "buffer_size": 0  # Sender doesn't have buffer info
-                            }
-                            requests.post(monitor_url, json=stats_payload, timeout=0.5)
-                            logger.debug(f"Sent stats to monitor: {stats_payload}")
-                        except Exception as e:
-                            logger.debug(f"Failed to send stats to monitor: {e}")
-                            
-                        last_stats_time = now
-                        last_bytes_sent = total_bytes_sent
-                        last_sent_count = sent_count
-                
-                # Yield the chunk for the gRPC stream
-                yield chunk
-                
-            except Exception as e:
-                logger.error(f"Error in request generator: {e}")
-                error_count += 1
-                if error_count > 10:
-                    logger.error("Too many errors, stopping")
-                    break
-                    
-    def stop(self):
-        """Stop streaming and clean up resources."""
-        logger.info("Stopping sender...")
-        self.running = False
-        
-        # Wait for streaming thread to end
-        if hasattr(self, 'stream_thread') and self.stream_thread.is_alive():
-            self.stream_thread.join(timeout=2.0)
-            
-        self.cleanup()
-        logger.info("Sender stopped")
-        
-    def cleanup(self):
-        """Clean up resources."""
-        # Stop audio capture
-        if self.audio_capture:
-            self.audio_capture.stop_stream()
-            
-        # Close gRPC channel
-        if self.grpc_channel:
-            self.grpc_channel.close()
-            
-        self.audio_capture = None
-        self.encoder = None
-        self.grpc_channel = None
-        self.stub = None
-        
-def list_audio_devices():
-    """List all available audio devices."""
-    devices = sd.query_devices()
-    print("\nAvailable audio devices:")
-    print("Index\tName")
-    print("-" * 50)
-    for i, device in enumerate(devices):
-        if device['max_input_channels'] > 0:  # Only show input devices
-            print(f"{i}\t{device['name']}")
-    print("-" * 50)
+            logger.info("Streaming stopped.")
+            # Consider trying to reconnect if disconnected due to error
+
+    def close(self):
+        """Close the gRPC connection."""
+        if self.channel:
+            self.channel.close()
+            logger.info("gRPC connection closed.")
+        self.connected = False
+
+def signal_handler(sig, frame):
+    """Handle termination signals."""
+    logger.info("Shutdown signal received. Stopping sender...")
+    shutdown_flag.set()
 
 def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(description="Voice Communication Sender")
-    parser.add_argument("--target", type=str,
-                      help="Target receiver address in format host:port")
-    parser.add_argument("--mic", type=int, default=None,
-                      help="Microphone device index (None for default)")
-    parser.add_argument("--bitrate", type=float, default=TARGET_BITRATE,
-                      help=f"Target bitrate in kbps (default: {TARGET_BITRATE})")
-    parser.add_argument("--list-devices", action="store_true",
-                      help="List available audio devices and exit")
+    parser = argparse.ArgumentParser(description="Audio Sender using HuBERT and Speaker Embeddings")
+    parser.add_argument("--target", required=True, help="Receiver address (e.g., localhost:50051)")
+    parser.add_argument("--mic", type=int, default=None, help="Microphone device index (use --list-devices to see options)")
+    # parser.add_argument("--bitrate", type=float, default=6.0, help="Target bitrate (Not used in this version)") # Removed bitrate
+    parser.add_argument("--list-devices", action="store_true", help="List available audio devices and exit")
+    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mps"], help="Device for models (cpu, cuda, mps)")
+    parser.add_argument("--monitor-url", default=os.environ.get("MONITOR_URL"), help="URL for the WebUI monitor API (e.g., http://localhost:8765/update)")
+    parser.add_argument("--offline", action="store_true", help="Use only local cached models")
+
     args = parser.parse_args()
-    
+
     if args.list_devices:
         list_audio_devices()
-        return
-        
-    if not args.target:
-        parser.error("--target is required when not listing devices")
-        
-    sender = Sender(
-        target_address=args.target,
-        mic_device=args.mic,
-        bitrate=args.bitrate
-    )
-    
-    if not sender.setup():
-        logger.error("Failed to set up sender")
-        return
-        
-    if not sender.start():
-        logger.error("Failed to start sender")
-        return
-        
+        sys.exit(0)
+
+    # Setup signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Initialize Audio Capture (ensure sample rate matches feature extractor)
     try:
-        logger.info("Sender running. Press Ctrl+C to stop.")
-        while sender.running:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-    finally:
-        sender.stop()
-        
+        audio_capture = AudioCapture(
+            device_index=args.mic,
+            sample_rate=TARGET_SAMPLE_RATE, # Use 16kHz
+            chunk_size=CHUNK_SAMPLES,       # Use 320 samples
+            monitor_url=args.monitor_url
+        )
+        audio_capture.start()
+        logger.info("Audio capture started.")
+    except Exception as e:
+        logger.error(f"Failed to initialize audio capture: {e}", exc_info=True)
+        sys.exit(1)
+
+    # Initialize Audio Processor (which includes Feature Extractor)
+    try:
+        processor = AudioProcessor(
+            target=args.target,
+            device=args.device,
+            monitor_url=args.monitor_url
+        )
+    except Exception as e:
+        logger.error(f"Failed to initialize Audio Processor / Feature Extractor: {e}", exc_info=True)
+        if audio_capture:
+             audio_capture.stop()
+        sys.exit(1)
+
+    # Connection and streaming loop
+    while not shutdown_flag.is_set():
+        if not processor.connected:
+            logger.info("Attempting to connect to receiver...")
+            if not processor.connect():
+                logger.warning("Connection failed, retrying in 5 seconds...")
+                shutdown_flag.wait(5) # Wait for 5 seconds or until shutdown signal
+                continue
+
+        # Start streaming (this call blocks until stream ends/fails)
+        processor.start_streaming(audio_capture)
+
+        # If start_streaming returns (e.g., due to error), loop will check connection
+        if not shutdown_flag.is_set():
+             logger.warning("Streaming ended unexpectedly. Will attempt to reconnect...")
+             # Optional: Add a small delay before attempting reconnection
+             shutdown_flag.wait(2)
+
+    # Cleanup
+    logger.info("Initiating cleanup...")
+    audio_capture.stop()
+    processor.close()
+    logger.info("Sender finished gracefully.")
+
 if __name__ == "__main__":
-    sys.exit(main()) 
+    main() 

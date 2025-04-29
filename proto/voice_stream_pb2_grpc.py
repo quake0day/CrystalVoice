@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from proto import voice_stream_pb2 as voice__stream__pb2
+import voice_stream_pb2 as voice__stream__pb2
 
 GRPC_GENERATED_VERSION = '1.71.0'
 GRPC_VERSION = grpc.__version__
@@ -25,8 +25,8 @@ if _version_not_supported:
     )
 
 
-class VoiceStreamStub(object):
-    """The VoiceStream service definition.
+class VoiceStreamerStub(object):
+    """Service definition for voice streaming
     """
 
     def __init__(self, channel):
@@ -35,46 +35,46 @@ class VoiceStreamStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.Transmit = channel.stream_unary(
-                '/voicecomm.VoiceStream/Transmit',
-                request_serializer=voice__stream__pb2.AudioChunk.SerializeToString,
-                response_deserializer=voice__stream__pb2.Ack.FromString,
+        self.StreamVoice = channel.stream_stream(
+                '/voice_stream.VoiceStreamer/StreamVoice',
+                request_serializer=voice__stream__pb2.VoiceChunk.SerializeToString,
+                response_deserializer=voice__stream__pb2.VoiceAck.FromString,
                 _registered_method=True)
 
 
-class VoiceStreamServicer(object):
-    """The VoiceStream service definition.
+class VoiceStreamerServicer(object):
+    """Service definition for voice streaming
     """
 
-    def Transmit(self, request_iterator, context):
-        """Client-to-server streaming RPC for sending audio chunks
+    def StreamVoice(self, request_iterator, context):
+        """Bidirectional stream for voice data
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
 
-def add_VoiceStreamServicer_to_server(servicer, server):
+def add_VoiceStreamerServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'Transmit': grpc.stream_unary_rpc_method_handler(
-                    servicer.Transmit,
-                    request_deserializer=voice__stream__pb2.AudioChunk.FromString,
-                    response_serializer=voice__stream__pb2.Ack.SerializeToString,
+            'StreamVoice': grpc.stream_stream_rpc_method_handler(
+                    servicer.StreamVoice,
+                    request_deserializer=voice__stream__pb2.VoiceChunk.FromString,
+                    response_serializer=voice__stream__pb2.VoiceAck.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'voicecomm.VoiceStream', rpc_method_handlers)
+            'voice_stream.VoiceStreamer', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('voicecomm.VoiceStream', rpc_method_handlers)
+    server.add_registered_method_handlers('voice_stream.VoiceStreamer', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
-class VoiceStream(object):
-    """The VoiceStream service definition.
+class VoiceStreamer(object):
+    """Service definition for voice streaming
     """
 
     @staticmethod
-    def Transmit(request_iterator,
+    def StreamVoice(request_iterator,
             target,
             options=(),
             channel_credentials=None,
@@ -84,12 +84,12 @@ class VoiceStream(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.stream_unary(
+        return grpc.experimental.stream_stream(
             request_iterator,
             target,
-            '/voicecomm.VoiceStream/Transmit',
-            voice__stream__pb2.AudioChunk.SerializeToString,
-            voice__stream__pb2.Ack.FromString,
+            '/voice_stream.VoiceStreamer/StreamVoice',
+            voice__stream__pb2.VoiceChunk.SerializeToString,
+            voice__stream__pb2.VoiceAck.FromString,
             options,
             channel_credentials,
             insecure,

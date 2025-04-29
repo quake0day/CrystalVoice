@@ -10,20 +10,36 @@ from scipy import signal
 import torch
 from model.model_config import SAMPLE_RATE, CHANNELS
 
-def normalize_audio(audio):
+# Setup logging
+logger = logging.getLogger(__name__)
+
+def normalize_audio(audio, target_level=-20.0):
     """
-    Normalize audio to range [-1, 1].
+    Normalize audio volume to a target dB level.
     
     Args:
         audio: numpy array of audio samples
+        target_level: target dB level
         
     Returns:
         Normalized audio array
     """
-    # Avoid division by zero
-    if np.max(np.abs(audio)) > 0:
-        return audio / np.max(np.abs(audio))
-    return audio
+    if audio.dtype != np.float32:
+        audio = audio.astype(np.float32)
+        
+    rms = np.sqrt(np.mean(audio**2))
+    if rms == 0: return audio # Avoid division by zero for silence
+    
+    current_level_db = 20 * np.log10(rms)
+    gain_db = target_level - current_level_db
+    gain_linear = 10**(gain_db / 20.0)
+    
+    normalized_audio = audio * gain_linear
+    
+    # Clip just in case normalization pushes values beyond [-1, 1]
+    normalized_audio = np.clip(normalized_audio, -1.0, 1.0)
+    
+    return normalized_audio
 
 def int16_to_float32(audio):
     """
@@ -35,6 +51,8 @@ def int16_to_float32(audio):
     Returns:
         float32, range [-1, 1] audio array
     """
+    if audio.dtype != np.int16:
+        raise ValueError("Input array must be of type int16")
     return audio.astype(np.float32) / 32768.0
 
 def float32_to_int16(audio):
@@ -47,7 +65,9 @@ def float32_to_int16(audio):
     Returns:
         int16 PCM audio array
     """
-    # Clip to the valid range for int16
+    if audio.dtype != np.float32:
+        raise ValueError("Input array must be of type float32")
+    # Ensure values are clipped
     audio = np.clip(audio, -1.0, 1.0)
     return (audio * 32767).astype(np.int16)
 
@@ -126,6 +146,12 @@ def get_timestamp_ms():
     """Get the current timestamp in milliseconds."""
     return int(time.time() * 1000)
 
+def measure_latency(start_time_ms, label="process"):
+    """Calculate latency based on start time."""
+    latency = get_timestamp_ms() - start_time_ms
+    logger.debug(f"{label.capitalize()} latency: {latency} ms")
+    return latency
+
 def list_audio_devices():
     """
     List all available audio devices.
@@ -133,33 +159,57 @@ def list_audio_devices():
     Returns:
         A formatted string listing all audio devices
     """
+    print("\nAvailable Audio Devices:")
+    print("Index\tName\t\t\t\tType")
+    print("-"*80)
     devices = sd.query_devices()
-    result = "Available audio devices:\n"
-    
     for i, device in enumerate(devices):
-        device_type = []
-        if device['max_input_channels'] > 0:
-            device_type.append("INPUT")
+        dev_type = "Input" if device['max_input_channels'] > 0 else ""
         if device['max_output_channels'] > 0:
-            device_type.append("OUTPUT")
-            
-        channels = f"(in:{device['max_input_channels']}, out:{device['max_output_channels']})"
-        result += f"{i}: {device['name']} {channels} {', '.join(device_type)}\n"
-    
-    return result
+            if dev_type:
+                dev_type += "/Output"
+            else:
+                dev_type = "Output"
+        print(f"{i}\t{device['name']:<40}\t{dev_type}")
+    print("-"*80)
 
-def measure_latency(mark_time, reference="capture"):
+# --- Added SoundDeviceStreamWrapper --- 
+default_stream_config = {}
+class SoundDeviceStreamWrapper:
     """
-    Measure and log latency between different stages.
-    
-    Args:
-        mark_time: timestamp of the event (in ms)
-        reference: reference point ("capture", "encode", "decode", "playback")
-        
-    Returns:
-        Latency in ms
+    A simple wrapper around sounddevice.InputStream for a consistent interface.
     """
-    now = get_timestamp_ms()
-    latency = now - mark_time
-    logging.debug(f"Latency from {reference} to current: {latency}ms")
-    return latency 
+    def __init__(self, device=None, samplerate=None, channels=None, blocksize=None, callback=None):
+        self.stream = sd.InputStream(
+            device=device,
+            samplerate=samplerate,
+            channels=channels,
+            blocksize=blocksize,
+            dtype='float32', # Assuming float32 based on audio_capture usage
+            callback=callback
+        )
+
+    def start(self):
+        if self.stream and not self.stream.active:
+            self.stream.start()
+            logger.info("SoundDevice stream started.")
+
+    def stop(self):
+        if self.stream and self.stream.active:
+            self.stream.stop()
+            logger.info("SoundDevice stream stopped.")
+
+    def close(self):
+        if self.stream:
+            # Ensure stream is stopped before closing
+            if self.stream.active:
+                self.stream.stop()
+            self.stream.close()
+            logger.info("SoundDevice stream closed.")
+            self.stream = None # Prevent reuse
+
+    # Optional: Add an is_active property if needed
+    @property
+    def active(self):
+        return self.stream.active if self.stream else False
+# --- End Added SoundDeviceStreamWrapper --- 

@@ -24,17 +24,17 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12voice_stream.proto\x12\tvoicecomm\"R\n\nAudioChunk\x12\x15\n\rencoded_frame\x18\x01 \x01(\x0c\x12\x14\n\x0ctimestamp_ms\x18\x02 \x01(\x03\x12\x17\n\x0fsequence_number\x18\x03 \x01(\x05\"(\n\x03\x41\x63k\x12\x10\n\x08received\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t2D\n\x0bVoiceStream\x12\x35\n\x08Transmit\x12\x15.voicecomm.AudioChunk\x1a\x0e.voicecomm.Ack\"\x00(\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12voice_stream.proto\x12\x0cvoice_stream\"i\n\nVoiceChunk\x12\x13\n\x0bsequence_id\x18\x01 \x01(\x03\x12\x14\n\x0ctimestamp_ms\x18\x02 \x01(\x03\x12\x15\n\rhubert_tokens\x18\x03 \x01(\x0c\x12\x19\n\x11speaker_embedding\x18\x04 \x01(\x0c\"/\n\x08VoiceAck\x12\x13\n\x0bsequence_id\x18\x01 \x01(\x03\x12\x0e\n\x06status\x18\x02 \x01(\t2T\n\rVoiceStreamer\x12\x43\n\x0bStreamVoice\x12\x18.voice_stream.VoiceChunk\x1a\x16.voice_stream.VoiceAck(\x01\x30\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'voice_stream_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_AUDIOCHUNK']._serialized_start=33
-  _globals['_AUDIOCHUNK']._serialized_end=115
-  _globals['_ACK']._serialized_start=117
-  _globals['_ACK']._serialized_end=157
-  _globals['_VOICESTREAM']._serialized_start=159
-  _globals['_VOICESTREAM']._serialized_end=227
+  _globals['_VOICECHUNK']._serialized_start=36
+  _globals['_VOICECHUNK']._serialized_end=141
+  _globals['_VOICEACK']._serialized_start=143
+  _globals['_VOICEACK']._serialized_end=190
+  _globals['_VOICESTREAMER']._serialized_start=192
+  _globals['_VOICESTREAMER']._serialized_end=276
 # @@protoc_insertion_point(module_scope)
