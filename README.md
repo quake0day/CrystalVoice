@@ -1,4 +1,6 @@
-# Low-Bandwidth Zero-Distortion Voice Communication Prototype
+# CrystalVoice: Low-Bandwidth Zero-Distortion Voice Communication Prototype
+
+![CrystalVoice Logo](https://i.v2ex.co/E5v87f3mb.png)
 
 [![English](https://img.shields.io/badge/Language-English-blue)](README.md) [![中文](https://img.shields.io/badge/语言-中文-red)](#chinese)
 
@@ -30,8 +32,8 @@ Key features:
 
 1. Clone this repository:
 ```bash
-git clone https://github.com/yourusername/LBZDVC.git
-cd LBZDVC
+git clone https://github.com/quake0day/CrystalVoice.git
+cd CrystalVoice
 ```
 
 2. Create and activate a virtual environment:
@@ -153,7 +155,9 @@ Both sender and receiver components automatically send performance metrics to th
 
 <a name="chinese"></a>
 
-# 低带宽零失真语音通信原型系统
+# CrystalVoice: 低带宽零失真语音通信原型系统
+
+![CrystalVoice Logo](https://i.v2ex.co/E5v87f3mb.png)
 
 [![English](https://img.shields.io/badge/Language-English-blue)](#) [![中文](https://img.shields.io/badge/语言-中文-red)](README.md#chinese)
 
@@ -185,8 +189,8 @@ Both sender and receiver components automatically send performance metrics to th
 
 1. 克隆此存储库：
 ```bash
-git clone https://github.com/yourusername/LBZDVC.git
-cd LBZDVC
+git clone https://github.com/quake0day/CrystalVoice.git
+cd CrystalVoice
 ```
 
 2. 创建并激活虚拟环境：
